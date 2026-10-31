@@ -1,6 +1,18 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+function safePortalTarget(value: string | null, origin: string) {
+  if (!value || value.startsWith("//") || value.includes("\\")) return null;
+  try {
+    const target = new URL(value, origin);
+    if (target.origin !== origin) return null;
+    if (target.pathname !== "/portal" && !target.pathname.startsWith("/portal/")) return null;
+    return target;
+  } catch {
+    return null;
+  }
+}
+
 export async function middleware(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -18,18 +30,33 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  const { data: { user } } = await supabase.auth.getUser();
-  const isProtected = request.nextUrl.pathname.startsWith("/dashboard") || request.nextUrl.pathname.startsWith("/portal");
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const pathname = request.nextUrl.pathname;
+  const isProtected = pathname.startsWith("/dashboard") || pathname.startsWith("/portal");
+
   if (isProtected && !user) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
+    loginUrl.search = "";
+    if (pathname.startsWith("/portal")) {
+      const requestedPath = `${pathname}${request.nextUrl.search}`;
+      loginUrl.searchParams.set("next", requestedPath);
+    }
     return NextResponse.redirect(loginUrl);
   }
-  if (request.nextUrl.pathname === "/login" && user) {
-    const dashboardUrl = request.nextUrl.clone();
-    dashboardUrl.pathname = "/dashboard";
-    return NextResponse.redirect(dashboardUrl);
+
+  if (pathname === "/login" && user) {
+    const destination = safePortalTarget(request.nextUrl.searchParams.get("next"), request.nextUrl.origin)
+      || request.nextUrl.clone();
+    if (destination.pathname === "/login") {
+      destination.pathname = "/dashboard";
+      destination.search = "";
+    }
+    return NextResponse.redirect(destination);
   }
+
   return response;
 }
 

@@ -1,3 +1,324 @@
-import {redirect} from "next/navigation";import {createClient} from "@/lib/supabase/server";import {startSubscription,manageSubscription} from "./actions";import {money,date,periodLabel,title} from "@/lib/format";import {signOut} from "@/app/dashboard/actions";
-export default async function Portal({searchParams}:{searchParams:Promise<{success?:string;error?:string}>}){const s=await createClient();const {data:{user}}=await s.auth.getUser();if(!user)redirect("/login");const {data:profile}=await s.from("profiles").select("business_id,role,full_name").eq("id",user.id).maybeSingle();if(!profile)redirect("/login?error=Run%20the%20Supabase%20setup%20SQL%20to%20provision%20your%20account");if(profile.role!=="customer")redirect("/dashboard");const p=await searchParams;const [customerResult,plansResult]=await Promise.all([s.from("customers").select("id,name").eq("user_id",user.id).single(),s.from("pricing_plans").select("id,name,description,amount_minor,interval,period_unit,period_count,trial_days").eq("business_id",profile.business_id).eq("enabled",true).order("amount_minor")]) as any;const customer=customerResult.data;const plans=plansResult.data??[];let subs:any[]=[],invoices:any[]=[],payments:any[]=[];if(customer){const result=await Promise.all([s.from("subscriptions").select("id,status,amount_minor,interval,period_unit,period_count,next_billing_at,pricing_plans(name)").eq("customer_id",customer.id).order("created_at",{ascending:false}),s.from("invoices").select("id,invoice_number,status,total_minor,created_at,due_at").eq("customer_id",customer.id).order("created_at",{ascending:false}),s.from("payments").select("id,status,amount_minor,created_at,note").eq("customer_id",customer.id).order("created_at",{ascending:false})]) as any;subs=result[0].data??[];invoices=result[1].data??[];payments=result[2].data??[]}return <main className="portal-page"><header className="portal-header"><a className="brand" href="/portal"><span className="brand-mark">b</span><span>brightloop</span></a><div><span>{customer?.name||profile.full_name||user.email}</span><form action={signOut}><button className="small-button">Sign out</button></form></div></header><section className="portal-content"><div className="page-heading"><div><p className="eyebrow">CUSTOMER PORTAL</p><h1>Your subscription</h1><p>Manage your plan and review billing history.</p></div></div>{p.success&&<div className="alert success">{p.success}</div>}{p.error&&<div className="alert error">{p.error}</div>}<div className="panel"><h2>Current subscriptions</h2>{subs.length?<div className="portal-sub-list">{subs.map((sub:any)=><article className="portal-sub" key={sub.id}><div><span className={`status ${sub.status}`}>{title(sub.status)}</span><h3>{sub.pricing_plans?.name}</h3><strong>{money(sub.amount_minor)} / {periodLabel(sub.period_unit,sub.period_count)}</strong><p>Next billing: {date(sub.next_billing_at)}</p></div><div className="row-actions"><form action={manageSubscription}><input type="hidden" name="id" value={sub.id}/><button className="small-button" name="action" value={sub.status==="paused"?"resume":"pause"}>{sub.status==="paused"?"Resume":"Pause"}</button></form><form action={manageSubscription}><input type="hidden" name="id" value={sub.id}/><button className="small-button danger-text" name="action" value="cancel">Cancel</button></form></div></article>)}</div>:<div className="empty-state">You do not have a subscription yet. Choose a plan below.</div>}</div><div className="portal-plan-heading"><div><h2>Available plans</h2><p>Choose a plan to get started.</p></div></div><div className="plan-grid">{plans.map((plan:any)=><article className="pricing-card" key={plan.id}><span className="eyebrow">BRIGHTLOOP PLAN</span><h2>{plan.name}</h2><p>{plan.description}</p><strong className="plan-price">{money(plan.amount_minor)}<small> / {periodLabel(plan.period_unit,plan.period_count)}</small></strong><form action={startSubscription}><input type="hidden" name="plan_id" value={plan.id}/><button className="button primary full">Subscribe</button></form></article>)}</div><div className="portal-columns"><DataPanel heading="Invoices" rows={invoices.map((i:any)=>[i.invoice_number,title(i.status),money(i.total_minor),date(i.created_at)])} headers={["Invoice","Status","Amount","Date"]}/><DataPanel heading="Payment history" rows={payments.map((i:any)=>[i.note||"Simulation",title(i.status),money(i.amount_minor),date(i.created_at)])} headers={["Transaction","Status","Amount","Date"]}/></div><p className="help-text">Payments are simulated for this demonstration; no real money is collected.</p></section></main>}
-function DataPanel({heading,rows,headers}:{heading:string;rows:string[][];headers:string[]}){return <section className="panel"><h2>{heading}</h2>{rows.length?<div className="table-wrap"><table><thead><tr>{headers.map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.map((x,j)=><td key={j}>{x}</td>)}</tr>)}</tbody></table></div>:<div className="empty-state">Nothing here yet.</div>}</section>}
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
+import { money, date, title } from "@/lib/format";
+import { signOutCustomer, startSubscription } from "./actions";
+import { SubscriptionActions } from "./SubscriptionActions";
+import styles from "./portal.module.css";
+
+type PortalSearchParams = Promise<{ success?: string; error?: string }>;
+
+export default async function Portal({
+  searchParams,
+}: {
+  searchParams: PortalSearchParams;
+}) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) redirect("/login?next=%2Fportal");
+
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("business_id, role, full_name")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (profileError || !profile) {
+    redirect("/login?error=Your%20Brightloop%20account%20could%20not%20be%20verified.");
+  }
+  if (profile.role !== "customer") redirect("/dashboard");
+
+  const params = await searchParams;
+  const { data: customer, error: customerError } = await supabase
+    .from("customers")
+    .select("id, name, email, business_id")
+    .eq("user_id", user.id)
+    .eq("business_id", profile.business_id)
+    .maybeSingle();
+
+  const [plansResult, subscriptionsResult, invoicesResult, paymentsResult] = customer
+    ? await Promise.all([
+        supabase
+          .from("pricing_plans")
+          .select("id, name, description, amount_minor, interval, trial_days, products(name)")
+          .eq("business_id", profile.business_id)
+          .eq("enabled", true)
+          .order("amount_minor"),
+        supabase
+          .from("subscriptions")
+          .select(
+            "id, status, amount_minor, interval, started_at, period_start, period_end, next_billing_at, products(name), pricing_plans(name)",
+          )
+          .eq("customer_id", customer.id)
+          .eq("business_id", profile.business_id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("invoices")
+          .select("id, invoice_number, status, total_minor, created_at, due_at")
+          .eq("customer_id", customer.id)
+          .eq("business_id", profile.business_id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("payments")
+          .select(
+            "id, invoice_id, status, amount_minor, created_at, note, method, is_simulated, invoices(invoice_number)",
+          )
+          .eq("customer_id", customer.id)
+          .eq("business_id", profile.business_id)
+          .order("created_at", { ascending: false }),
+      ])
+    : [
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+      ];
+
+  const plans = plansResult.data ?? [];
+  const subscriptions = subscriptionsResult.data ?? [];
+  const invoices = invoicesResult.data ?? [];
+  const payments = paymentsResult.data ?? [];
+  const displayName = customer?.name || profile.full_name || user.email || "Customer";
+
+  return (
+    <main className={styles.portalPage}>
+      <header className={styles.portalHeader}>
+        <Link className={styles.brand} href="/portal" aria-label="Brightloop customer portal home">
+          <span className={styles.brandMark}>b</span>
+          <span>brightloop</span>
+        </Link>
+        <div className={styles.headerAccount}>
+          <span className={styles.accountName}>{displayName}</span>
+          <form action={signOutCustomer}>
+            <button className={styles.secondaryButton} type="submit">
+              Sign out
+            </button>
+          </form>
+        </div>
+      </header>
+
+      <div className={styles.content}>
+        <section className={styles.pageHeading}>
+          <div>
+            <p className={styles.eyebrow}>CUSTOMER PORTAL</p>
+            <h1>Your account</h1>
+            <p>View your subscriptions, invoices, and payment activity.</p>
+          </div>
+        </section>
+
+        {params.success && <div className={styles.successAlert} role="status">{params.success}</div>}
+        {params.error && <div className={styles.errorAlert} role="alert">{params.error}</div>}
+        {customerError && (
+          <div className={styles.errorAlert} role="alert">
+            We could not load your customer profile. Please refresh or contact the business.
+          </div>
+        )}
+
+        <section className={styles.panel} aria-labelledby="subscriptions-heading">
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2 id="subscriptions-heading">Your subscriptions</h2>
+              <p>Review your product, plan, billing period, and renewal date.</p>
+            </div>
+            <span className={styles.countPill}>{subscriptions.length}</span>
+          </div>
+          {subscriptionsResult.error ? (
+            <div className={styles.inlineError} role="alert">Subscriptions could not be loaded right now.</div>
+          ) : subscriptions.length ? (
+            <div className={styles.subscriptionList}>
+              {subscriptions.map((subscription: any) => {
+                const canPause = ["active", "trialing", "past_due"].includes(subscription.status);
+                const canResume = subscription.status === "paused";
+                const canCancel = ["active", "trialing", "past_due", "paused"].includes(
+                  subscription.status,
+                );
+                return (
+                  <article className={styles.subscriptionCard} key={subscription.id}>
+                    <div className={styles.subscriptionMain}>
+                      <span className={`${styles.status} ${styles[`status_${subscription.status}`] || ""}`}>
+                        {title(subscription.status)}
+                      </span>
+                      <h3>{subscription.products?.name || "Subscription"}</h3>
+                      <p className={styles.planName}>{subscription.pricing_plans?.name || "Plan"}</p>
+                      <strong className={styles.subscriptionPrice}>
+                        {money(subscription.amount_minor)} <span>/ {subscription.interval}</span>
+                      </strong>
+                      <dl className={styles.subscriptionFacts}>
+                        <div>
+                          <dt>Started</dt>
+                          <dd>{date(subscription.started_at)}</dd>
+                        </div>
+                        <div>
+                          <dt>Current period</dt>
+                          <dd>{date(subscription.period_start)} – {date(subscription.period_end)}</dd>
+                        </div>
+                        <div>
+                          <dt>Next renewal</dt>
+                          <dd>
+                            {["cancelled", "expired"].includes(subscription.status)
+                              ? "—"
+                              : date(subscription.next_billing_at)}
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                    {(canPause || canResume || canCancel) && (
+                      <SubscriptionActions
+                        subscriptionId={subscription.id}
+                        status={subscription.status}
+                        canPause={canPause}
+                        canResume={canResume}
+                        canCancel={canCancel}
+                      />
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className={styles.emptyState}>
+              You do not have any subscriptions yet. Choose a plan below to get started.
+            </div>
+          )}
+        </section>
+
+        <section className={styles.panel} aria-labelledby="invoices-heading">
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2 id="invoices-heading">Invoices</h2>
+              <p>Open an invoice to review the full details or print a copy.</p>
+            </div>
+            <span className={styles.countPill}>{invoices.length}</span>
+          </div>
+          {invoicesResult.error ? (
+            <div className={styles.inlineError} role="alert">Invoices could not be loaded right now.</div>
+          ) : invoices.length ? (
+            <div className={styles.tableWrap}>
+              <table className={styles.dataTable}>
+                <thead>
+                  <tr>
+                    <th>Invoice</th>
+                    <th>Status</th>
+                    <th>Issued</th>
+                    <th>Due</th>
+                    <th className={styles.numericCell}>Total</th>
+                    <th><span className={styles.visuallyHidden}>Details</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invoices.map((invoice: any) => (
+                    <tr key={invoice.id}>
+                      <td><strong>{invoice.invoice_number}</strong></td>
+                      <td>
+                        <span className={`${styles.status} ${styles[`status_${invoice.status}`] || ""}`}>
+                          {title(invoice.status)}
+                        </span>
+                      </td>
+                      <td>{date(invoice.created_at)}</td>
+                      <td>{date(invoice.due_at)}</td>
+                      <td className={styles.numericCell}>{money(invoice.total_minor)}</td>
+                      <td>
+                        <Link className={styles.textLink} href={`/portal/invoices/${invoice.id}`}>
+                          View invoice <span aria-hidden="true">→</span>
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className={styles.emptyState}>Invoices created for your subscriptions will appear here.</div>
+          )}
+        </section>
+
+        <section className={styles.panel} aria-labelledby="payments-heading">
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2 id="payments-heading">Payment history</h2>
+              <p>Successful and failed payment attempts associated with your account.</p>
+            </div>
+            <span className={styles.countPill}>{payments.length}</span>
+          </div>
+          {paymentsResult.error ? (
+            <div className={styles.inlineError} role="alert">Payment history could not be loaded right now.</div>
+          ) : payments.length ? (
+            <div className={styles.tableWrap}>
+              <table className={styles.dataTable}>
+                <thead>
+                  <tr>
+                    <th>Invoice</th>
+                    <th>Status</th>
+                    <th>Date</th>
+                    <th>Method</th>
+                    <th className={styles.numericCell}>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payments.map((payment: any) => (
+                    <tr key={payment.id}>
+                      <td>
+                        <Link className={styles.textLink} href={`/portal/invoices/${payment.invoice_id}`}>
+                          {payment.invoices?.invoice_number || "View invoice"}
+                        </Link>
+                      </td>
+                      <td>
+                        <span className={`${styles.status} ${styles[`status_${payment.status}`] || ""}`}>
+                          {title(payment.status)}
+                        </span>
+                      </td>
+                      <td>{date(payment.created_at)}</td>
+                      <td>{payment.is_simulated ? "Simulated" : title(payment.method || "Payment")}</td>
+                      <td className={styles.numericCell}>{money(payment.amount_minor)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className={styles.emptyState}>Your payment attempts will appear here.</div>
+          )}
+        </section>
+
+        <section className={styles.planSection} aria-labelledby="plans-heading">
+          <div className={styles.sectionHeading}>
+            <div>
+              <h2 id="plans-heading">Available plans</h2>
+              <p>Choose an available plan to start a subscription.</p>
+            </div>
+          </div>
+          {plansResult.error ? (
+            <div className={styles.errorAlert} role="alert">Available plans could not be loaded right now.</div>
+          ) : plans.length ? (
+            <div className={styles.planGrid}>
+              {plans.map((plan: any) => (
+                <article className={styles.planCard} key={plan.id}>
+                  <p className={styles.eyebrow}>BRIGHTLOOP PLAN</p>
+                  <h3>{plan.products?.name || plan.name}</h3>
+                  <p className={styles.planDescription}>{plan.description || "Subscription plan"}</p>
+                  <strong className={styles.planPrice}>
+                    {money(plan.amount_minor)} <span>/ {plan.interval}</span>
+                  </strong>
+                  {plan.trial_days > 0 && <p className={styles.trialNote}>{plan.trial_days}-day trial included</p>}
+                  <form action={startSubscription}>
+                    <input type="hidden" name="plan_id" value={plan.id} />
+                    <button className={styles.primaryButton} type="submit">Subscribe</button>
+                  </form>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className={styles.emptyState}>There are no plans available to purchase right now.</div>
+          )}
+        </section>
+
+        <p className={styles.disclaimer}>
+          Demo environment: payments shown as simulated do not collect real money or payment details.
+        </p>
+      </div>
+    </main>
+  );
+}
