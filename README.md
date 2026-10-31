@@ -31,6 +31,7 @@ A hackathon MVP for recurring subscription operations, built with Next.js 15, Ty
 
 - Supabase signup, login, email confirmation callback, password reset, and session refresh.
 - Admin dashboard with database-backed MRR, customer/subscription/invoice/payment counts, plan mix, activity, and upcoming renewals.
+- Product catalog with create, edit, archive/restore, product type, category, reference/barcode, sale/purchase flags, product image uploads, and recurring billing setup. New recurring products automatically create their first linked pricing plan.
 - Customer records and pricing plan creation.
 - Subscription creation, pause, resume, and cancellation.
 - Idempotent “Run billing cycle” action to create recurring invoices.
@@ -41,4 +42,6 @@ A hackathon MVP for recurring subscription operations, built with Next.js 15, Ty
 ## Demo data and first account
 
 The SQL script seeds the Brightloop business, Starter/Pro/Business plans, eight demo customer records, twelve subscriptions, invoices, payment attempts, and activity events. Use a normal signup for the admin. If the Supabase project already has Auth users, the SQL script automatically attaches them to the seeded business: the most recently signed-in user is the admin and the rest are customer portal users.
-# brightloop
+
+
+If you already installed the MVP schema, run `supabase/products_section.sql` once in Supabase SQL Editor before opening Products. It adds fields and the product image bucket without deleting current products or subscriptions. For a clean database, the full setup script already includes these fields.

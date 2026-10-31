@@ -73,6 +73,16 @@ create table public.products (
   business_id uuid not null references public.businesses(id) on delete cascade,
   name text not null,
   description text not null default '',
+  product_type text not null default 'service' check (product_type in ('service','digital','goods')),
+  category text,
+  internal_reference text,
+  barcode text,
+  can_be_sold boolean not null default true,
+  can_be_purchased boolean not null default false,
+  recurring boolean not null default false,
+  list_price_minor bigint not null default 0 check (list_price_minor >= 0),
+  cost_minor bigint not null default 0 check (cost_minor >= 0),
+  image_url text,
   enabled boolean not null default true,
   created_at timestamptz not null default now(),
   unique (business_id, name)
@@ -181,8 +191,8 @@ declare
   v_product uuid;
 begin
   insert into public.businesses(name) values ('Brightloop Software') returning id into v_business;
-  insert into public.products(business_id, name, description)
-    values (v_business, 'Brightloop Workspace', 'Subscription workspace and collaboration tools.') returning id into v_product;
+  insert into public.products(business_id, name, description, product_type, internal_reference, can_be_sold, can_be_purchased, recurring, list_price_minor)
+    values (v_business, 'Brightloop Workspace', 'Subscription workspace and collaboration tools.', 'service', null, true, false, true, 29900) returning id into v_product;
   insert into public.pricing_plans(business_id, product_id, name, description, amount_minor, interval, enabled, recommended)
   values
     (v_business, v_product, 'Starter', 'For small teams getting started.', 29900, 'monthly', true, false),
@@ -368,6 +378,7 @@ begin
   select id into v_customer from public.customers where user_id=v_user and business_id=v_business;
   select * into v_plan from public.pricing_plans where id=p_plan_id and business_id=v_business and enabled;
   if v_customer is null or v_plan.id is null then raise exception 'Customer or plan not found.' using errcode = 'P0002'; end if;
+  if not exists(select 1 from public.products where id=v_plan.product_id and enabled and can_be_sold) then raise exception 'This product is not currently available for sale.' using errcode = '22023'; end if;
   if v_plan.trial_days > 0 then v_end := v_start + make_interval(days => v_plan.trial_days);
   else v_end := v_start + case v_plan.interval when 'quarterly' then interval '3 months' when 'yearly' then interval '1 year' else interval '1 month' end; end if;
   insert into public.subscriptions(business_id,customer_id,product_id,plan_id,status,amount_minor,interval,started_at,period_start,period_end,next_billing_at)
@@ -433,7 +444,7 @@ create policy customers_self_read on public.customers for select to authenticate
 create policy products_staff on public.products for all to authenticated using(business_id=(select public.current_business_id()) and (select public.is_business_staff())) with check(business_id=(select public.current_business_id()) and (select public.is_business_staff()));
 create policy products_customer_read on public.products for select to authenticated using(enabled and business_id=(select public.current_business_id()));
 create policy plans_staff on public.pricing_plans for all to authenticated using(business_id=(select public.current_business_id()) and (select public.is_business_staff())) with check(business_id=(select public.current_business_id()) and (select public.is_business_staff()));
-create policy plans_customer_read on public.pricing_plans for select to authenticated using(enabled and business_id=(select public.current_business_id()));
+create policy plans_customer_read on public.pricing_plans for select to authenticated using(enabled and business_id=(select public.current_business_id()) and exists(select 1 from public.products p where p.id=product_id and p.enabled and p.can_be_sold));
 create policy subscriptions_staff on public.subscriptions for all to authenticated using(business_id=(select public.current_business_id()) and (select public.is_business_staff())) with check(business_id=(select public.current_business_id()) and (select public.is_business_staff()));
 create policy subscriptions_customer_read on public.subscriptions for select to authenticated using(exists(select 1 from public.customers c where c.id=customer_id and c.user_id=(select auth.uid())));
 create policy invoices_staff on public.invoices for all to authenticated using(business_id=(select public.current_business_id()) and (select public.is_business_staff())) with check(business_id=(select public.current_business_id()) and (select public.is_business_staff()));
@@ -449,6 +460,22 @@ grant usage on schema public to authenticated;
 grant select, insert, update, delete on public.businesses, public.profiles, public.customers,
   public.products, public.pricing_plans, public.subscriptions, public.invoices,
   public.invoice_items, public.payments, public.activity_logs to authenticated;
+
+insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
+values ('brightloop-products', 'brightloop-products', true, 5242880, array['image/png','image/jpeg','image/webp'])
+on conflict (id) do update set public=true, file_size_limit=excluded.file_size_limit, allowed_mime_types=excluded.allowed_mime_types;
+drop policy if exists brightloop_product_images_public_read on storage.objects;
+create policy brightloop_product_images_public_read on storage.objects for select to public using (bucket_id='brightloop-products');
+drop policy if exists brightloop_product_images_staff_insert on storage.objects;
+create policy brightloop_product_images_staff_insert on storage.objects for insert to authenticated
+with check (bucket_id='brightloop-products' and (storage.foldername(name))[1]=(select public.current_business_id())::text and (select public.is_business_staff()));
+drop policy if exists brightloop_product_images_staff_update on storage.objects;
+create policy brightloop_product_images_staff_update on storage.objects for update to authenticated
+using (bucket_id='brightloop-products' and (storage.foldername(name))[1]=(select public.current_business_id())::text and (select public.is_business_staff()))
+with check (bucket_id='brightloop-products' and (storage.foldername(name))[1]=(select public.current_business_id())::text and (select public.is_business_staff()));
+drop policy if exists brightloop_product_images_staff_delete on storage.objects;
+create policy brightloop_product_images_staff_delete on storage.objects for delete to authenticated
+using (bucket_id='brightloop-products' and (storage.foldername(name))[1]=(select public.current_business_id())::text and (select public.is_business_staff()));
 
 -- Existing Auth users: most recently used account becomes the initial admin;
 -- other existing accounts get customer access. Future users are auto-provisioned by trigger.
