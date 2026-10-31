@@ -1,0 +1,3 @@
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
+export async function requireWorkspace() { const supabase=await createClient(); const {data:{user}}=await supabase.auth.getUser(); if(!user) redirect("/login"); const {data:profile,error}=await supabase.from("profiles").select("business_id,full_name,role").eq("id",user.id).maybeSingle(); if(error||!profile) redirect("/login?error=Account%20setup%20is%20missing.%20Run%20supabase%2Fsetup_mvp.sql%20in%20the%20Supabase%20SQL%20Editor."); if(profile.role==="customer") redirect("/portal"); return {supabase,user,profile,businessId:profile.business_id}; }
